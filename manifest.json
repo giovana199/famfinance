@@ -1,0 +1,10 @@
+
+{
+  "name": "FamFinance",
+  "short_name": "FamFinance",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0f0f13",
+  "theme_color": "#8b5cf6",
+  "icons": []
+}

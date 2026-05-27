@@ -1,0 +1,48 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FamFinance</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>💰 FamFinance</h1>
+      <button id="exportBtn">Exportar</button>
+    </header>
+
+    <section class="summary">
+      <div class="card">
+        <span>Total</span>
+        <strong id="total">R$ 0,00</strong>
+      </div>
+      <div class="card">
+        <span>Pago</span>
+        <strong id="paid">R$ 0,00</strong>
+      </div>
+      <div class="card">
+        <span>Pendente</span>
+        <strong id="pending">R$ 0,00</strong>
+      </div>
+    </section>
+
+    <section class="add-form">
+      <input type="text" id="name" placeholder="Nome da conta">
+      <input type="number" id="amount" placeholder="Valor">
+      <input type="date" id="date">
+      <button id="addBtn">Adicionar conta</button>
+    </section>
+
+    <section>
+      <h2>Contas</h2>
+      <div id="list"></div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
