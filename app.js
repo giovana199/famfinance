@@ -1,7 +1,9 @@
 /* ── FamFinance app.js ── */
 
-const STORAGE_KEY = "famfinance_v3";
-const LEGACY_KEYS = ["famfinance_v2"];
+const STORAGE_KEY = "famfinance_v4";
+const LEGACY_KEYS = ["famfinance_v3", "famfinance_v2"];
+const NOTIFICATION_KEY = "famfinance_notifications_v1";
+const NOTIFICATION_ASKED_KEY = "famfinance_notifications_asked";
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
 const CATS = [
@@ -91,6 +93,9 @@ function normalizeBill(raw) {
   }
   b.amount = Number(b.amount || 0);
   b.paid = Boolean(b.paid);
+  b.paidAt = b.paidAt || null;
+  b.deleted = Boolean(b.deleted);
+  b.deletedAt = b.deletedAt || null;
   return b;
 }
 
@@ -185,12 +190,24 @@ function ensureGeneratedForMonth(year = curYear, month = curMonth) {
   if (changed) save();
 }
 
-function billsForMonth() {
+function billsForMonth(includeDeleted = false) {
   ensureGeneratedForMonth(curYear, curMonth);
   return bills.filter(b => {
+    if (!includeDeleted && b.deleted) return false;
     const d = parseLocalDate(b.date);
     return d.getMonth() === curMonth && d.getFullYear() === curYear;
   });
+}
+
+function allDeletedBills() {
+  return bills.filter(b => b.deleted).sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+}
+
+function cleanupOldDeletedBills() {
+  const limit = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const before = bills.length;
+  bills = bills.filter(b => !b.deleted || !b.deletedAt || new Date(b.deletedAt).getTime() > limit);
+  if (bills.length !== before) save();
 }
 
 // ── NAVIGATION ────────────────────────────────────────────────────────────────
@@ -234,7 +251,7 @@ function renderDashboard() {
   $('pfill').style.width       = total > 0 ? Math.round(paidT / total * 100) + '%' : '0%';
 
   const alerts = bills
-    .filter(b => { if (b.paid) return false; const d = daysUntil(b.date); return d >= 0 && d <= 5; })
+    .filter(b => { if (b.deleted || b.paid) return false; const d = daysUntil(b.date); return d >= 0 && d <= 5; })
     .sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date))
     .slice(0, 3);
 
@@ -309,14 +326,17 @@ function renderChart(mb) {
 }
 
 function typeLabel(b) {
-  if (b.type === 'recurring') return ' · 🔁 recorrente';
-  if (b.type === 'installment') return ` · 💳 ${b.installmentCurrent}/${b.installmentTotal}`;
-  return '';
+  let label = '';
+  if (b.type === 'recurring') label = ' · 🔁 recorrente';
+  if (b.type === 'installment') label = ` · 💳 ${b.installmentCurrent}/${b.installmentTotal}`;
+  if (b.paid && b.paidAt) label += ' · pago em ' + new Date(b.paidAt).toLocaleDateString('pt-BR');
+  if (b.deleted && b.deletedAt) label += ' · excluída em ' + new Date(b.deletedAt).toLocaleDateString('pt-BR');
+  return label;
 }
 
 function renderBills() {
   const listEl = $('list');
-  let filtered = billsForMonth();
+  let filtered = activeFilter === 'trash' ? allDeletedBills() : billsForMonth();
 
   if (activeFilter === 'paid')    filtered = filtered.filter(b => b.paid);
   if (activeFilter === 'pending') filtered = filtered.filter(b => !b.paid && getStatus(b) === 'pending');
@@ -325,7 +345,9 @@ function renderBills() {
   filtered.sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
 
   if (!filtered.length) {
-    listEl.innerHTML = '<div class="empty">😊<br>Nenhuma conta aqui!</div>';
+    listEl.innerHTML = activeFilter === 'trash'
+      ? '<div class="empty">🗑<br>Lixeira vazia.</div>'
+      : '<div class="empty">😊<br>Nenhuma conta aqui!</div>';
     return;
   }
 
@@ -334,16 +356,16 @@ function renderBills() {
   filtered.forEach(b => {
     const st     = getStatus(b);
     const cat    = CATS.find(c => c.n === b.category) || CATS[9];
-    const stLbl  = st === 'paid' ? 'Pago' : st === 'overdue' ? 'Vencida' : 'Pendente';
-    const valClr = st === 'paid' ? '#00d4aa' : st === 'overdue' ? '#ff6b6b' : '#f0eff8';
+    const stLbl  = b.deleted ? 'Na lixeira' : st === 'paid' ? 'Pago' : st === 'overdue' ? 'Vencida' : 'Pendente';
+    const valClr = b.deleted ? '#9998b8' : st === 'paid' ? '#00d4aa' : st === 'overdue' ? '#ff6b6b' : '#f0eff8';
     const dateStr = parseLocalDate(b.date).toLocaleDateString('pt-BR');
 
     const wrapper = document.createElement('div');
     wrapper.className = 'bill-wrapper';
     wrapper.innerHTML = `
       <div class="swipe-bg">
-        <span class="swipe-del-lbl">🗑 Excluir</span>
-        <span class="swipe-pay-lbl">${b.paid ? '↩ Desfazer' : '✅ Pago'}</span>
+        <span class="swipe-del-lbl">${b.deleted ? '❌ Apagar' : '🗑 Excluir'}</span>
+        <span class="swipe-pay-lbl">${b.deleted ? '↩ Restaurar' : b.paid ? '↩ Desfazer' : '✅ Pago'}</span>
       </div>
       <div class="bill-item" data-id="${b.id}">
         <div class="bill-cat">${cat.e}</div>
@@ -353,21 +375,24 @@ function renderBills() {
         </div>
         <div class="bill-right">
           <div class="bill-val" style="color:${valClr}">${fmt(b.amount)}</div>
-          <span class="bst s-${st}">${stLbl}</span>
+          <span class="bst ${b.deleted ? 's-deleted' : 's-' + st}">${stLbl}</span>
         </div>
         <div class="bill-acts">
-          <button class="ibtn pay-ibtn" title="${b.paid ? 'Desfazer' : 'Marcar pago'}">${b.paid ? '✅' : '⭕'}</button>
-          <button class="ibtn edit-ibtn" title="Editar">✏️</button>
-          <button class="ibtn del-ibtn" title="Excluir">🗑</button>
+          ${b.deleted ? '<button class="ibtn restore-ibtn" title="Restaurar">↩️</button><button class="ibtn del-ibtn" title="Excluir definitivamente">❌</button>' : `<button class="ibtn pay-ibtn" title="${b.paid ? 'Desfazer' : 'Marcar pago'}">${b.paid ? '✅' : '⭕'}</button><button class="ibtn edit-ibtn" title="Editar">✏️</button><button class="ibtn del-ibtn" title="Excluir">🗑</button>`}
         </div>
       </div>`;
 
     const item = wrapper.querySelector('.bill-item');
     listEl.appendChild(wrapper);
 
-    wrapper.querySelector('.pay-ibtn').addEventListener('click', e => { e.stopPropagation(); togglePaid(b.id); });
-    wrapper.querySelector('.edit-ibtn').addEventListener('click', e => { e.stopPropagation(); openEdit(b.id); });
-    wrapper.querySelector('.del-ibtn').addEventListener('click', e => { e.stopPropagation(); deleteBill(b.id); });
+    const payBtn = wrapper.querySelector('.pay-ibtn');
+    const editBtn = wrapper.querySelector('.edit-ibtn');
+    const restoreBtn = wrapper.querySelector('.restore-ibtn');
+    const delBtn = wrapper.querySelector('.del-ibtn');
+    if (payBtn) payBtn.addEventListener('click', e => { e.stopPropagation(); togglePaid(b.id); });
+    if (editBtn) editBtn.addEventListener('click', e => { e.stopPropagation(); openEdit(b.id); });
+    if (restoreBtn) restoreBtn.addEventListener('click', e => { e.stopPropagation(); restoreBill(b.id); });
+    if (delBtn) delBtn.addEventListener('click', e => { e.stopPropagation(); b.deleted ? permanentlyDeleteBill(b.id) : deleteBill(b.id); });
 
     setupSwipe(item, wrapper, b.id);
   });
@@ -398,10 +423,17 @@ function setupSwipe(item, wrapper, id) {
     active = false; item.style.transition = 'transform .25s ease'; wrapper.style.background = '';
     if (curX > THRESHOLD) {
       item.style.transform = 'translateX(110%)';
-      setTimeout(() => { togglePaid(id); item.style.transform = ''; }, 220);
+      setTimeout(() => {
+        const b = bills.find(x => x.id === id);
+        if (b && b.deleted) restoreBill(id); else togglePaid(id);
+        item.style.transform = '';
+      }, 220);
     } else if (curX < -THRESHOLD) {
       item.style.transform = 'translateX(-110%)';
-      setTimeout(() => { deleteBill(id); }, 220);
+      setTimeout(() => {
+        const b = bills.find(x => x.id === id);
+        if (b && b.deleted) permanentlyDeleteBill(id); else deleteBill(id);
+      }, 220);
     } else item.style.transform = '';
     curX = 0;
   });
@@ -412,20 +444,44 @@ function setupSwipe(item, wrapper, id) {
 // ── BILL ACTIONS ──────────────────────────────────────────────────────────────
 function togglePaid(id) {
   const b = bills.find(x => x.id === id);
-  if (b) { b.paid = !b.paid; save(); render(); }
+  if (!b || b.deleted) return;
+  b.paid = !b.paid;
+  b.paidAt = b.paid ? new Date().toISOString() : null;
+  save();
+  render();
 }
 
 function deleteBill(id) {
   const b = bills.find(x => x.id === id);
   if (!b) return;
 
-  let msg = 'Excluir esta conta?';
-  if (b.type === 'recurring') msg = 'Excluir apenas esta ocorrência recorrente? As próximas continuam sendo geradas.';
-  if (b.type === 'installment') msg = 'Excluir apenas esta parcela? As outras parcelas serão mantidas.';
+  let msg = 'Mover esta conta para a lixeira? Você poderá restaurar depois.';
+  if (b.type === 'recurring') msg = 'Mover esta ocorrência recorrente para a lixeira? As próximas continuam sendo geradas.';
+  if (b.type === 'installment') msg = 'Mover esta parcela para a lixeira? As outras parcelas serão mantidas.';
   if (!confirm(msg)) return;
 
+  b.deleted = true;
+  b.deletedAt = new Date().toISOString();
+  save();
+  render();
+}
+
+function restoreBill(id) {
+  const b = bills.find(x => x.id === id);
+  if (!b) return;
+  b.deleted = false;
+  b.deletedAt = null;
+  save();
+  render();
+}
+
+function permanentlyDeleteBill(id) {
+  const b = bills.find(x => x.id === id);
+  if (!b) return;
+  if (!confirm('Excluir definitivamente? Esta ação não poderá ser desfeita.')) return;
   bills = bills.filter(x => x.id !== id);
-  save(); render();
+  save();
+  render();
 }
 
 // ── MODAL: ADD / EDIT ─────────────────────────────────────────────────────────
@@ -493,6 +549,9 @@ function buildInstallments({ name, amount, date, category, total }) {
     date: addMonths(date, i),
     category,
     paid: false,
+    paidAt: null,
+    deleted: false,
+    deletedAt: null,
     recurring: false,
     installmentCurrent: i + 1,
     installmentTotal: count,
@@ -537,7 +596,7 @@ function saveBill() {
   } else {
     const base = {
       id: uid('bill'), name, amount, date, category: selectedCat,
-      type, paid: false, recurring: type === 'recurring',
+      type, paid: false, paidAt: null, deleted: false, deletedAt: null, recurring: type === 'recurring',
     };
     if (type === 'recurring') {
       base.seriesId = uid('rec');
@@ -562,10 +621,10 @@ function closeBillModal() {
 function openWpp() {
   ensureGeneratedForMonth(curYear, curMonth);
   const currentMonthBills = billsForMonth();
-  const pend = currentMonthBills.filter(b => !b.paid).sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
+  const pend = currentMonthBills.filter(b => !b.deleted && !b.paid).sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
   const overdue = pend.filter(b => getStatus(b) === 'overdue');
   const upcoming = pend.filter(b => getStatus(b) === 'pending');
-  const paidInMonth = currentMonthBills.filter(b => b.paid);
+  const paidInMonth = currentMonthBills.filter(b => !b.deleted && b.paid);
 
   let msg = '💰 *FamFinance – Resumo de Contas*\n';
   msg += `📅 ${MONTHS[curMonth]} ${curYear}\n\n`;
@@ -611,9 +670,122 @@ function exportData() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// ── NOTIFICATIONS ────────────────────────────────────────────────────────────
+function notificationsSupported() {
+  return 'Notification' in window && 'serviceWorker' in navigator;
+}
+
+function askNotificationPermission() {
+  if (!notificationsSupported()) return;
+  if (Notification.permission !== 'default') return;
+  if (localStorage.getItem(NOTIFICATION_ASKED_KEY)) return;
+
+  localStorage.setItem(NOTIFICATION_ASKED_KEY, 'yes');
+  setTimeout(() => {
+    const ok = confirm('Deseja receber lembretes de contas vencendo no celular?');
+    if (ok) Notification.requestPermission().then(() => checkDueNotifications());
+  }, 1200);
+}
+
+function notificationMemory() {
+  try { return JSON.parse(localStorage.getItem(NOTIFICATION_KEY) || '{}'); }
+  catch(e) { return {}; }
+}
+
+function saveNotificationMemory(memory) {
+  localStorage.setItem(NOTIFICATION_KEY, JSON.stringify(memory));
+}
+
+async function showAppNotification(title, options) {
+  if (!notificationsSupported() || Notification.permission !== 'granted') return;
+  const registration = await navigator.serviceWorker.ready;
+  if (registration && registration.showNotification) {
+    registration.showNotification(title, options);
+  } else {
+    new Notification(title, options);
+  }
+}
+
+function checkDueNotifications() {
+  if (!notificationsSupported() || Notification.permission !== 'granted') return;
+
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const memory = notificationMemory();
+  const dueBills = bills
+    .filter(b => !b.deleted && !b.paid)
+    .map(b => ({ bill: b, days: daysUntil(b.date) }))
+    .filter(x => x.days === 3 || x.days === 1 || x.days === 0 || x.days < 0)
+    .sort((a, b) => a.days - b.days)
+    .slice(0, 3);
+
+  dueBills.forEach(({ bill, days }) => {
+    const key = `${todayKey}|${bill.id}|${days}`;
+    if (memory[key]) return;
+
+    const when = days < 0 ? `venceu há ${Math.abs(days)} dia${Math.abs(days) !== 1 ? 's' : ''}`
+      : days === 0 ? 'vence hoje'
+      : days === 1 ? 'vence amanhã'
+      : 'vence em 3 dias';
+
+    showAppNotification('FamFinance: lembrete de conta', {
+      body: `${bill.name} ${when} — ${fmt(bill.amount)}`,
+      icon: './manifest.json',
+      badge: './manifest.json',
+      tag: `famfinance-${bill.id}-${todayKey}`,
+      renotify: false,
+      data: { url: './index.html' }
+    });
+    memory[key] = true;
+  });
+
+  saveNotificationMemory(memory);
+}
+
+// ── PWA UPDATE HANDLER ───────────────────────────────────────────────────────
+function setupPwaUpdates() {
+  if (!('serviceWorker' in navigator)) return;
+
+  let refreshing = false;
+
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (refreshing) return;
+    refreshing = true;
+    window.location.reload();
+  });
+
+  function activateNewWorker(registration) {
+    if (registration && registration.waiting) {
+      registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+    }
+  }
+
+  navigator.serviceWorker.register('sw.js').then(registration => {
+    registration.update();
+    activateNewWorker(registration);
+
+    registration.addEventListener('updatefound', () => {
+      const newWorker = registration.installing;
+      if (!newWorker) return;
+
+      newWorker.addEventListener('statechange', () => {
+        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+          newWorker.postMessage({ type: 'SKIP_WAITING' });
+        }
+      });
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') registration.update();
+    });
+
+    setInterval(() => registration.update(), 60 * 60 * 1000);
+  }).catch(() => {});
+}
+
 // ── INIT ──────────────────────────────────────────────────────────────────────
 function init() {
   load();
+  cleanupOldDeletedBills();
 
   $('prevMonth').addEventListener('click', () => changeMonth(-1));
   $('nextMonth').addEventListener('click', () => changeMonth(1));
@@ -639,11 +811,13 @@ function init() {
     chip.classList.add('active'); activeFilter = chip.dataset.f; renderBills();
   }));
 
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').then(reg => reg.update()).catch(() => {});
-  }
+  setupPwaUpdates();
+  askNotificationPermission();
 
   render();
+  checkDueNotifications();
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkDueNotifications(); });
+  setInterval(checkDueNotifications, 6 * 60 * 60 * 1000);
 }
 
 document.addEventListener('DOMContentLoaded', init);
