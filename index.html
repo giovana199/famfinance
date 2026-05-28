@@ -1,46 +1,152 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>FamFinance</title>
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
-  <div class="app">
-    <header>
-      <h1>💰 FamFinance</h1>
-      <button id="exportBtn">Exportar</button>
-    </header>
 
-    <section class="summary">
-      <div class="card">
-        <span>Total</span>
-        <strong id="total">R$ 0,00</strong>
-      </div>
-      <div class="card">
-        <span>Pago</span>
-        <strong id="paid">R$ 0,00</strong>
-      </div>
-      <div class="card">
-        <span>Pendente</span>
-        <strong id="pending">R$ 0,00</strong>
-      </div>
-    </section>
+  <!-- HEADER -->
+  <header class="header">
+    <div class="logo">💰 FamFinance</div>
+    <div class="header-actions">
+      <button class="hbtn wpp-btn-hdr" id="wppBtn">📱 WhatsApp</button>
+      <button class="hbtn" id="exportBtn">📤</button>
+    </div>
+  </header>
 
-    <section class="add-form">
-      <input type="text" id="name" placeholder="Nome da conta">
-      <input type="number" id="amount" placeholder="Valor">
-      <input type="date" id="date">
-      <button id="addBtn">Adicionar conta</button>
-    </section>
+  <!-- MAIN CONTENT -->
+  <main class="main">
 
-    <section>
-      <h2>Contas</h2>
+    <!-- ── VIEW: DASHBOARD ── -->
+    <div id="view-dashboard" class="view active">
+
+      <div class="month-nav">
+        <button id="prevMonth" class="month-arrow">&#8249;</button>
+        <span id="monthLabel"></span>
+        <button id="nextMonth" class="month-arrow">&#8250;</button>
+      </div>
+
+      <!-- Summary Cards -->
+      <div class="summary-cards">
+        <div class="card card-total">
+          <span class="card-label">Total</span>
+          <strong class="card-value" id="total">R$ 0,00</strong>
+          <div class="card-sub" id="totalCount">0 contas</div>
+        </div>
+        <div class="card card-paid">
+          <span class="card-label">Pago</span>
+          <strong class="card-value" id="paid">R$ 0,00</strong>
+          <div class="pbar"><div class="pfill" id="pfill"></div></div>
+        </div>
+        <div class="card card-pending">
+          <span class="card-label">Pendente</span>
+          <strong class="card-value" id="pending">R$ 0,00</strong>
+          <div class="card-sub" id="pendingCount">0 pendentes</div>
+        </div>
+      </div>
+
+      <!-- Alerts -->
+      <div id="alertsSection" style="display:none" class="section">
+        <div class="section-title">⚠️ Vencendo em breve</div>
+        <div id="alertsList"></div>
+      </div>
+
+      <!-- Chart -->
+      <div class="section">
+        <div class="section-title">Gastos por categoria</div>
+        <div class="chart-wrap">
+          <div class="chart-box">
+            <canvas id="catChart"></canvas>
+            <div class="chart-center" id="chartCenter"></div>
+          </div>
+        </div>
+        <div id="catLegend" class="cat-legend"></div>
+      </div>
+
+    </div>
+
+    <!-- ── VIEW: CONTAS ── -->
+    <div id="view-bills" class="view">
+      <div class="filter-bar">
+        <button class="fchip active" data-f="all">Todas</button>
+        <button class="fchip" data-f="pending">Pendentes</button>
+        <button class="fchip" data-f="overdue">Vencidas</button>
+        <button class="fchip" data-f="paid">Pagas</button>
+      </div>
+      <p class="swipe-hint">← deslize para excluir &nbsp;·&nbsp; deslize para pagar →</p>
       <div id="list"></div>
-    </section>
+    </div>
+
+  </main>
+
+  <!-- FAB -->
+  <button class="fab" id="fabBtn">+</button>
+
+  <!-- BOTTOM NAV -->
+  <nav class="bottom-nav">
+    <button class="nav-btn active" data-view="dashboard">
+      <span class="nav-icon">📊</span>
+      <span>Dashboard</span>
+    </button>
+    <button class="nav-btn" data-view="bills">
+      <span class="nav-icon">📋</span>
+      <span>Contas</span>
+    </button>
+  </nav>
+
+  <!-- MODAL: ADD / EDIT BILL -->
+  <div class="overlay" id="billModal" style="display:none">
+    <div class="modal" id="billModalBox">
+      <div class="modal-hdr">
+        <span id="modalTitle">Nova conta</span>
+        <button class="xbtn" id="closeBillModal">✕</button>
+      </div>
+
+      <div class="fg">
+        <label class="fl">Nome da conta</label>
+        <input class="fi" type="text" id="fName" placeholder="Ex: Conta de luz">
+      </div>
+
+      <div class="frow">
+        <div class="fg">
+          <label class="fl">Valor (R$)</label>
+          <input class="fi" type="number" id="fAmount" placeholder="0,00" step="0.01" min="0">
+        </div>
+        <div class="fg">
+          <label class="fl">Vencimento</label>
+          <input class="fi" type="date" id="fDate">
+        </div>
+      </div>
+
+      <div class="fg">
+        <label class="fl">Categoria</label>
+        <div class="cat-grid" id="catGrid"></div>
+        <input type="hidden" id="fCat" value="Outros">
+      </div>
+
+      <div class="fg check-group">
+        <input type="checkbox" id="fRec">
+        <label for="fRec">Repetir todo mês (recorrente)</label>
+      </div>
+
+      <button class="btn-primary" id="saveBtn">Adicionar conta</button>
+    </div>
+  </div>
+
+  <!-- MODAL: WHATSAPP -->
+  <div class="overlay" id="wppModal" style="display:none">
+    <div class="modal">
+      <div class="modal-hdr">
+        <span>📱 Resumo para WhatsApp</span>
+        <button class="xbtn" id="closeWpp">✕</button>
+      </div>
+      <div id="wppContent"></div>
+    </div>
   </div>
 
   <script src="app.js"></script>
