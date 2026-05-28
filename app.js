@@ -1,9 +1,7 @@
 /* ── FamFinance app.js ── */
 
-const STORAGE_KEY = "famfinance_v5";
-const LEGACY_KEYS = ["famfinance_v4", "famfinance_v3", "famfinance_v2"];
-const NOTIFICATION_KEY = "famfinance_notifications_v1";
-const NOTIFICATION_ASKED_KEY = "famfinance_notifications_asked";
+const STORAGE_KEY = "famfinance_v3";
+const LEGACY_KEYS = ["famfinance_v2"];
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
 const CATS = [
@@ -93,11 +91,8 @@ function normalizeBill(raw) {
   }
   b.amount = Number(b.amount || 0);
   b.paid = Boolean(b.paid);
-  b.paidAt = b.paidAt || null;
-  b.deleted = Boolean(b.deleted);
-  b.deletedAt = b.deletedAt || null;
-  b.cancelledFrom = b.cancelledFrom || null;
-  b.cancelledAt = b.cancelledAt || null;
+  if (b.paid && !b.paidAt) b.paidAt = new Date().toISOString();
+  if (!b.deleted) { b.deleted = false; b.deletedAt = null; }
   return b;
 }
 
@@ -144,7 +139,7 @@ function occurrenceKey(b) {
 
 function recurringSources() {
   const map = new Map();
-  bills.filter(b => b.type === 'recurring' && !b.cancelledFrom).forEach(b => {
+  bills.filter(b => b.type === 'recurring' && !b.deleted).forEach(b => {
     const current = map.get(b.seriesId);
     if (!current || parseLocalDate(b.baseDate || b.date) < parseLocalDate(current.baseDate || current.date)) {
       map.set(b.seriesId, b);
@@ -168,7 +163,7 @@ function ensureGeneratedForMonth(year = curYear, month = curMonth) {
   recurringSources().forEach(src => {
     const baseDate = src.baseDate || src.date;
     if (monthDiff(baseDate, year, month) < 0) return;
-    if (src.cancelledFrom && ymKey(year, month) >= src.cancelledFrom) return;
+    if (src.recurrenceEndDate && ymKey(year, month) > src.recurrenceEndDate) return;
     if (hasRecurringOccurrence(src.seriesId, year, month)) return;
 
     bills.push({
@@ -186,11 +181,6 @@ function ensureGeneratedForMonth(year = curYear, month = curMonth) {
       recurring: true,
       repeatForever: true,
       paid: false,
-      paidAt: null,
-      deleted: false,
-      deletedAt: null,
-      cancelledFrom: null,
-      cancelledAt: null,
     });
     changed = true;
   });
@@ -198,24 +188,12 @@ function ensureGeneratedForMonth(year = curYear, month = curMonth) {
   if (changed) save();
 }
 
-function billsForMonth(includeDeleted = false) {
+function billsForMonth() {
   ensureGeneratedForMonth(curYear, curMonth);
   return bills.filter(b => {
-    if (!includeDeleted && b.deleted) return false;
     const d = parseLocalDate(b.date);
-    return d.getMonth() === curMonth && d.getFullYear() === curYear;
+    return !b.deleted && d.getMonth() === curMonth && d.getFullYear() === curYear;
   });
-}
-
-function allDeletedBills() {
-  return bills.filter(b => b.deleted).sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
-}
-
-function cleanupOldDeletedBills() {
-  const limit = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const before = bills.length;
-  bills = bills.filter(b => !b.deleted || !b.deletedAt || new Date(b.deletedAt).getTime() > limit);
-  if (bills.length !== before) save();
 }
 
 // ── NAVIGATION ────────────────────────────────────────────────────────────────
@@ -242,6 +220,111 @@ function render() {
   if ($('view-bills').classList.contains('active')) renderBills();
 }
 
+
+function getBillsFor(year, month) {
+  const oldYear = curYear;
+  const oldMonth = curMonth;
+  curYear = year;
+  curMonth = month;
+  const result = billsForMonth().slice();
+  curYear = oldYear;
+  curMonth = oldMonth;
+  return result;
+}
+
+function monthStats(year, month) {
+  const items = getBillsFor(year, month);
+  const total = items.reduce((s, b) => s + b.amount, 0);
+  const paidItems = items.filter(b => b.paid);
+  const pendingItems = items.filter(b => !b.paid);
+  const paid = paidItems.reduce((s, b) => s + b.amount, 0);
+  const pending = pendingItems.reduce((s, b) => s + b.amount, 0);
+  const biggest = items.slice().sort((a, b) => b.amount - a.amount)[0] || null;
+  const byCat = {};
+  items.forEach(b => { byCat[b.category || 'Outros'] = (byCat[b.category || 'Outros'] || 0) + b.amount; });
+  const topCatName = Object.keys(byCat).sort((a, b) => byCat[b] - byCat[a])[0] || null;
+  return { items, total, paid, pending, paidItems, pendingItems, biggest, topCatName, topCatValue: topCatName ? byCat[topCatName] : 0 };
+}
+
+function previousMonthOf(year, month) {
+  return month === 0 ? { year: year - 1, month: 11 } : { year, month: month - 1 };
+}
+
+function monthlyInsight(cur, prev) {
+  if (!cur.items.length) return 'Cadastre contas neste mês para gerar insights automáticos.';
+  if (!prev.items.length && cur.pending === 0) return '🎉 Todas as contas cadastradas deste mês já estão pagas.';
+  if (!prev.items.length) return `Você tem ${cur.pendingItems.length} conta${cur.pendingItems.length !== 1 ? 's' : ''} pendente${cur.pendingItems.length !== 1 ? 's' : ''} neste mês.`;
+  const diff = cur.total - prev.total;
+  if (Math.abs(diff) < 0.01) return 'Seus gastos previstos estão estáveis em relação ao mês anterior.';
+  if (diff < 0) return `🎉 Você reduziu ${fmt(Math.abs(diff))} em relação ao mês anterior.`;
+  return `⚠️ Seus gastos previstos aumentaram ${fmt(diff)} em relação ao mês anterior.`;
+}
+
+function monthlySummaryMessage() {
+  const cur = monthStats(curYear, curMonth);
+  const prevInfo = previousMonthOf(curYear, curMonth);
+  const prev = monthStats(prevInfo.year, prevInfo.month);
+  const insight = monthlyInsight(cur, prev);
+  const biggest = cur.biggest ? `${cur.biggest.name} — ${fmt(cur.biggest.amount)}` : 'Sem contas';
+  const cat = cur.topCatName ? `${cur.topCatName} — ${fmt(cur.topCatValue)}` : 'Sem categoria';
+
+  let msg = `📊 *FamFinance – Resumo Mensal*\n`;
+  msg += `📅 ${MONTHS[curMonth]} ${curYear}\n\n`;
+  msg += `💰 Total previsto: *${fmt(cur.total)}*\n`;
+  msg += `✅ Pago: *${fmt(cur.paid)}*\n`;
+  msg += `⏳ Pendente: *${fmt(cur.pending)}*\n\n`;
+  msg += `🏆 Maior gasto: ${biggest}\n`;
+  msg += `📌 Categoria principal: ${cat}\n\n`;
+  msg += `${insight}`;
+  return msg;
+}
+
+function renderMonthlySummary() {
+  const el = $('monthlySummaryCard');
+  if (!el) return;
+  const cur = monthStats(curYear, curMonth);
+  const prevInfo = previousMonthOf(curYear, curMonth);
+  const prev = monthStats(prevInfo.year, prevInfo.month);
+  const insight = monthlyInsight(cur, prev);
+  const biggest = cur.biggest ? cur.biggest.name : 'Sem contas';
+  const biggestValue = cur.biggest ? fmt(cur.biggest.amount) : 'R$ 0,00';
+  const cat = cur.topCatName || 'Sem categoria';
+  const catValue = cur.topCatName ? fmt(cur.topCatValue) : 'R$ 0,00';
+  const diff = cur.total - prev.total;
+  const badge = !prev.items.length ? 'Novo mês' : diff < 0 ? 'Economia' : diff > 0 ? 'Atenção' : 'Estável';
+
+  el.innerHTML = `
+    <div class="ms-head">
+      <div>
+        <div class="ms-title">${MONTHS[curMonth]} ${curYear}</div>
+        <div class="ms-sub">Resumo automático com base nas contas cadastradas.</div>
+      </div>
+      <span class="ms-badge">${badge}</span>
+    </div>
+    <div class="ms-grid">
+      <div class="ms-mini"><span>Maior gasto</span><strong title="${biggest}">${biggestValue}</strong><div class="card-sub">${biggest}</div></div>
+      <div class="ms-mini"><span>Categoria top</span><strong title="${cat}">${catValue}</strong><div class="card-sub">${cat}</div></div>
+      <div class="ms-mini"><span>Pago</span><strong>${fmt(cur.paid)}</strong><div class="card-sub">${cur.paidItems.length} conta${cur.paidItems.length !== 1 ? 's' : ''}</div></div>
+      <div class="ms-mini"><span>Pendente</span><strong>${fmt(cur.pending)}</strong><div class="card-sub">${cur.pendingItems.length} conta${cur.pendingItems.length !== 1 ? 's' : ''}</div></div>
+    </div>
+    <div class="ms-insight">${insight}</div>
+    <button class="ms-share-btn" id="shareMonthlySummaryBtn">📱 Compartilhar resumo mensal</button>
+  `;
+  const btn = $('shareMonthlySummaryBtn');
+  if (btn) btn.addEventListener('click', openMonthlySummaryWpp);
+}
+
+function openMonthlySummaryWpp() {
+  const msg = monthlySummaryMessage();
+  const enc = encodeURIComponent(msg);
+  const preview = msg.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\*(.*?)\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+  $('wppContent').innerHTML = `
+    <div class="wpp-preview">${preview}</div>
+    <p class="wpp-tip">O WhatsApp vai abrir com o resumo mensal pronto para envio.</p>
+    <a class="wpp-open-btn" href="https://wa.me/?text=${enc}" target="_blank" rel="noopener">📱 Abrir no WhatsApp</a>`;
+  $('wppModal').style.display = 'flex';
+}
+
 function renderDashboard() {
   const mb    = billsForMonth();
   const total = mb.reduce((s, b) => s + b.amount, 0);
@@ -257,6 +340,8 @@ function renderDashboard() {
   $('pendingCount').textContent = pend.filter(b => getStatus(b) === 'pending').length +
     ' pendente' + (pend.length !== 1 ? 's' : '');
   $('pfill').style.width       = total > 0 ? Math.round(paidT / total * 100) + '%' : '0%';
+
+  renderMonthlySummary();
 
   const alerts = bills
     .filter(b => { if (b.deleted || b.paid) return false; const d = daysUntil(b.date); return d >= 0 && d <= 5; })
@@ -334,17 +419,14 @@ function renderChart(mb) {
 }
 
 function typeLabel(b) {
-  let label = '';
-  if (b.type === 'recurring') label = ' · 🔁 recorrente';
-  if (b.type === 'installment') label = ` · 💳 ${b.installmentCurrent}/${b.installmentTotal}`;
-  if (b.paid && b.paidAt) label += ' · pago em ' + new Date(b.paidAt).toLocaleDateString('pt-BR');
-  if (b.deleted && b.deletedAt) label += ' · excluída em ' + new Date(b.deletedAt).toLocaleDateString('pt-BR');
-  return label;
+  if (b.type === 'recurring') return ' · 🔁 recorrente';
+  if (b.type === 'installment') return ` · 💳 ${b.installmentCurrent}/${b.installmentTotal}`;
+  return '';
 }
 
 function renderBills() {
   const listEl = $('list');
-  let filtered = activeFilter === 'trash' ? allDeletedBills() : billsForMonth();
+  let filtered = billsForMonth();
 
   if (activeFilter === 'paid')    filtered = filtered.filter(b => b.paid);
   if (activeFilter === 'pending') filtered = filtered.filter(b => !b.paid && getStatus(b) === 'pending');
@@ -353,9 +435,7 @@ function renderBills() {
   filtered.sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
 
   if (!filtered.length) {
-    listEl.innerHTML = activeFilter === 'trash'
-      ? '<div class="empty">🗑<br>Lixeira vazia.</div>'
-      : '<div class="empty">😊<br>Nenhuma conta aqui!</div>';
+    listEl.innerHTML = '<div class="empty">😊<br>Nenhuma conta aqui!</div>';
     return;
   }
 
@@ -364,16 +444,16 @@ function renderBills() {
   filtered.forEach(b => {
     const st     = getStatus(b);
     const cat    = CATS.find(c => c.n === b.category) || CATS[9];
-    const stLbl  = b.deleted ? 'Na lixeira' : st === 'paid' ? 'Pago' : st === 'overdue' ? 'Vencida' : 'Pendente';
-    const valClr = b.deleted ? '#9998b8' : st === 'paid' ? '#00d4aa' : st === 'overdue' ? '#ff6b6b' : '#f0eff8';
+    const stLbl  = st === 'paid' ? 'Pago' : st === 'overdue' ? 'Vencida' : 'Pendente';
+    const valClr = st === 'paid' ? '#00d4aa' : st === 'overdue' ? '#ff6b6b' : '#f0eff8';
     const dateStr = parseLocalDate(b.date).toLocaleDateString('pt-BR');
 
     const wrapper = document.createElement('div');
     wrapper.className = 'bill-wrapper';
     wrapper.innerHTML = `
       <div class="swipe-bg">
-        <span class="swipe-del-lbl">${b.deleted ? '❌ Apagar' : '🗑 Excluir'}</span>
-        <span class="swipe-pay-lbl">${b.deleted ? '↩ Restaurar' : b.paid ? '↩ Desfazer' : '✅ Pago'}</span>
+        <span class="swipe-del-lbl">🗑 Excluir</span>
+        <span class="swipe-pay-lbl">${b.paid ? '↩ Desfazer' : '✅ Pago'}</span>
       </div>
       <div class="bill-item" data-id="${b.id}">
         <div class="bill-cat">${cat.e}</div>
@@ -383,24 +463,21 @@ function renderBills() {
         </div>
         <div class="bill-right">
           <div class="bill-val" style="color:${valClr}">${fmt(b.amount)}</div>
-          <span class="bst ${b.deleted ? 's-deleted' : 's-' + st}">${stLbl}</span>
+          <span class="bst s-${st}">${stLbl}</span>
         </div>
         <div class="bill-acts">
-          ${b.deleted ? '<button class="ibtn restore-ibtn" title="Restaurar">↩️</button><button class="ibtn del-ibtn" title="Excluir definitivamente">❌</button>' : `<button class="ibtn pay-ibtn" title="${b.paid ? 'Desfazer' : 'Marcar pago'}">${b.paid ? '✅' : '⭕'}</button><button class="ibtn edit-ibtn" title="Editar">✏️</button><button class="ibtn del-ibtn" title="Excluir">🗑</button>`}
+          <button class="ibtn pay-ibtn" title="${b.paid ? 'Desfazer' : 'Marcar pago'}">${b.paid ? '✅' : '⭕'}</button>
+          <button class="ibtn edit-ibtn" title="Editar">✏️</button>
+          <button class="ibtn del-ibtn" title="Excluir">🗑</button>
         </div>
       </div>`;
 
     const item = wrapper.querySelector('.bill-item');
     listEl.appendChild(wrapper);
 
-    const payBtn = wrapper.querySelector('.pay-ibtn');
-    const editBtn = wrapper.querySelector('.edit-ibtn');
-    const restoreBtn = wrapper.querySelector('.restore-ibtn');
-    const delBtn = wrapper.querySelector('.del-ibtn');
-    if (payBtn) payBtn.addEventListener('click', e => { e.stopPropagation(); togglePaid(b.id); });
-    if (editBtn) editBtn.addEventListener('click', e => { e.stopPropagation(); openEdit(b.id); });
-    if (restoreBtn) restoreBtn.addEventListener('click', e => { e.stopPropagation(); restoreBill(b.id); });
-    if (delBtn) delBtn.addEventListener('click', e => { e.stopPropagation(); b.deleted ? permanentlyDeleteBill(b.id) : deleteBill(b.id); });
+    wrapper.querySelector('.pay-ibtn').addEventListener('click', e => { e.stopPropagation(); togglePaid(b.id); });
+    wrapper.querySelector('.edit-ibtn').addEventListener('click', e => { e.stopPropagation(); openEdit(b.id); });
+    wrapper.querySelector('.del-ibtn').addEventListener('click', e => { e.stopPropagation(); deleteBill(b.id); });
 
     setupSwipe(item, wrapper, b.id);
   });
@@ -431,17 +508,10 @@ function setupSwipe(item, wrapper, id) {
     active = false; item.style.transition = 'transform .25s ease'; wrapper.style.background = '';
     if (curX > THRESHOLD) {
       item.style.transform = 'translateX(110%)';
-      setTimeout(() => {
-        const b = bills.find(x => x.id === id);
-        if (b && b.deleted) restoreBill(id); else togglePaid(id);
-        item.style.transform = '';
-      }, 220);
+      setTimeout(() => { togglePaid(id); item.style.transform = ''; }, 220);
     } else if (curX < -THRESHOLD) {
       item.style.transform = 'translateX(-110%)';
-      setTimeout(() => {
-        const b = bills.find(x => x.id === id);
-        if (b && b.deleted) permanentlyDeleteBill(id); else deleteBill(id);
-      }, 220);
+      setTimeout(() => { deleteBill(id); }, 220);
     } else item.style.transform = '';
     curX = 0;
   });
@@ -452,11 +522,7 @@ function setupSwipe(item, wrapper, id) {
 // ── BILL ACTIONS ──────────────────────────────────────────────────────────────
 function togglePaid(id) {
   const b = bills.find(x => x.id === id);
-  if (!b || b.deleted) return;
-  b.paid = !b.paid;
-  b.paidAt = b.paid ? new Date().toISOString() : null;
-  save();
-  render();
+  if (b) { b.paid = !b.paid; b.paidAt = b.paid ? new Date().toISOString() : null; save(); render(); }
 }
 
 function softDeleteBill(b) {
@@ -464,48 +530,11 @@ function softDeleteBill(b) {
   b.deletedAt = new Date().toISOString();
 }
 
-function deleteRecurringBill(b) {
-  const option = prompt(
-    'Esta conta é recorrente. O que deseja fazer?\n\n' +
-    '1 - Excluir somente este mês\n' +
-    '2 - Encerrar recorrência a partir deste mês\n' +
-    '3 - Excluir toda a recorrência\n\n' +
-    'Digite 1, 2 ou 3:',
-    '2'
-  );
-
-  if (option === null) return;
-  const choice = String(option).trim();
-  const currentYm = ymKey(parseLocalDate(b.date).getFullYear(), parseLocalDate(b.date).getMonth());
-  const now = new Date().toISOString();
-
-  if (choice === '1') {
-    softDeleteBill(b);
-  } else if (choice === '2') {
-    bills.forEach(x => {
-      if (x.type === 'recurring' && x.seriesId === b.seriesId) {
-        x.cancelledFrom = currentYm;
-        x.cancelledAt = now;
-        const xDate = parseLocalDate(x.date);
-        if (ymKey(xDate.getFullYear(), xDate.getMonth()) >= currentYm) softDeleteBill(x);
-      }
-    });
-  } else if (choice === '3') {
-    if (!confirm('Excluir toda a recorrência? Todas as ocorrências já criadas irão para a lixeira.')) return;
-    bills.forEach(x => {
-      if (x.type === 'recurring' && x.seriesId === b.seriesId) {
-        x.cancelledFrom = currentYm;
-        x.cancelledAt = now;
-        softDeleteBill(x);
-      }
-    });
-  } else {
-    alert('Opção inválida. A conta não foi excluída.');
-    return;
-  }
-
-  save();
-  render();
+function cleanupTrash() {
+  const limit = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const before = bills.length;
+  bills = bills.filter(b => !b.deletedAt || new Date(b.deletedAt).getTime() >= limit);
+  if (bills.length !== before) save();
 }
 
 function deleteBill(id) {
@@ -513,35 +542,40 @@ function deleteBill(id) {
   if (!b) return;
 
   if (b.type === 'recurring') {
-    deleteRecurringBill(b);
-    return;
+    const choice = prompt(
+      'Esta conta é recorrente. O que deseja fazer?\n\n' +
+      '1 - Excluir somente este mês\n' +
+      '2 - Encerrar recorrência a partir deste mês\n' +
+      '3 - Excluir toda a recorrência\n\n' +
+      'Digite 1, 2 ou 3:'
+    );
+
+    if (choice === '1') {
+      softDeleteBill(b);
+    } else if (choice === '2') {
+      const currentKey = ymKey(parseLocalDate(b.date).getFullYear(), parseLocalDate(b.date).getMonth());
+      bills.forEach(x => {
+        if (x.seriesId === b.seriesId && x.type === 'recurring') {
+          x.recurrenceEndDate = currentKey;
+          const xKey = ymKey(parseLocalDate(x.date).getFullYear(), parseLocalDate(x.date).getMonth());
+          if (xKey >= currentKey) softDeleteBill(x);
+        }
+      });
+    } else if (choice === '3') {
+      bills.forEach(x => { if (x.seriesId === b.seriesId && x.type === 'recurring') softDeleteBill(x); });
+    } else {
+      return;
+    }
+  } else {
+    const msg = b.type === 'installment'
+      ? 'Mover esta parcela para a lixeira? Ela será removida definitivamente em 7 dias.'
+      : 'Mover esta conta para a lixeira? Ela será removida definitivamente em 7 dias.';
+    if (!confirm(msg)) return;
+    softDeleteBill(b);
   }
 
-  let msg = 'Mover esta conta para a lixeira? Você poderá restaurar depois.';
-  if (b.type === 'installment') msg = 'Mover esta parcela para a lixeira? As outras parcelas serão mantidas.';
-  if (!confirm(msg)) return;
-
-  softDeleteBill(b);
-  save();
-  render();
-}
-
-function restoreBill(id) {
-  const b = bills.find(x => x.id === id);
-  if (!b) return;
-  b.deleted = false;
-  b.deletedAt = null;
-  save();
-  render();
-}
-
-function permanentlyDeleteBill(id) {
-  const b = bills.find(x => x.id === id);
-  if (!b) return;
-  if (!confirm('Excluir definitivamente? Esta ação não poderá ser desfeita.')) return;
-  bills = bills.filter(x => x.id !== id);
-  save();
-  render();
+  cleanupTrash();
+  save(); render();
 }
 
 // ── MODAL: ADD / EDIT ─────────────────────────────────────────────────────────
@@ -609,11 +643,6 @@ function buildInstallments({ name, amount, date, category, total }) {
     date: addMonths(date, i),
     category,
     paid: false,
-    paidAt: null,
-    deleted: false,
-    deletedAt: null,
-    cancelledFrom: null,
-    cancelledAt: null,
     recurring: false,
     installmentCurrent: i + 1,
     installmentTotal: count,
@@ -658,7 +687,7 @@ function saveBill() {
   } else {
     const base = {
       id: uid('bill'), name, amount, date, category: selectedCat,
-      type, paid: false, paidAt: null, deleted: false, deletedAt: null, cancelledFrom: null, cancelledAt: null, recurring: type === 'recurring',
+      type, paid: false, recurring: type === 'recurring',
     };
     if (type === 'recurring') {
       base.seriesId = uid('rec');
@@ -683,10 +712,10 @@ function closeBillModal() {
 function openWpp() {
   ensureGeneratedForMonth(curYear, curMonth);
   const currentMonthBills = billsForMonth();
-  const pend = currentMonthBills.filter(b => !b.deleted && !b.paid).sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
+  const pend = currentMonthBills.filter(b => !b.paid).sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
   const overdue = pend.filter(b => getStatus(b) === 'overdue');
   const upcoming = pend.filter(b => getStatus(b) === 'pending');
-  const paidInMonth = currentMonthBills.filter(b => !b.deleted && b.paid);
+  const paidInMonth = currentMonthBills.filter(b => b.paid);
 
   let msg = '💰 *FamFinance – Resumo de Contas*\n';
   msg += `📅 ${MONTHS[curMonth]} ${curYear}\n\n`;
@@ -732,122 +761,10 @@ function exportData() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// ── NOTIFICATIONS ────────────────────────────────────────────────────────────
-function notificationsSupported() {
-  return 'Notification' in window && 'serviceWorker' in navigator;
-}
-
-function askNotificationPermission() {
-  if (!notificationsSupported()) return;
-  if (Notification.permission !== 'default') return;
-  if (localStorage.getItem(NOTIFICATION_ASKED_KEY)) return;
-
-  localStorage.setItem(NOTIFICATION_ASKED_KEY, 'yes');
-  setTimeout(() => {
-    const ok = confirm('Deseja receber lembretes de contas vencendo no celular?');
-    if (ok) Notification.requestPermission().then(() => checkDueNotifications());
-  }, 1200);
-}
-
-function notificationMemory() {
-  try { return JSON.parse(localStorage.getItem(NOTIFICATION_KEY) || '{}'); }
-  catch(e) { return {}; }
-}
-
-function saveNotificationMemory(memory) {
-  localStorage.setItem(NOTIFICATION_KEY, JSON.stringify(memory));
-}
-
-async function showAppNotification(title, options) {
-  if (!notificationsSupported() || Notification.permission !== 'granted') return;
-  const registration = await navigator.serviceWorker.ready;
-  if (registration && registration.showNotification) {
-    registration.showNotification(title, options);
-  } else {
-    new Notification(title, options);
-  }
-}
-
-function checkDueNotifications() {
-  if (!notificationsSupported() || Notification.permission !== 'granted') return;
-
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const memory = notificationMemory();
-  const dueBills = bills
-    .filter(b => !b.deleted && !b.paid)
-    .map(b => ({ bill: b, days: daysUntil(b.date) }))
-    .filter(x => x.days === 3 || x.days === 1 || x.days === 0 || x.days < 0)
-    .sort((a, b) => a.days - b.days)
-    .slice(0, 3);
-
-  dueBills.forEach(({ bill, days }) => {
-    const key = `${todayKey}|${bill.id}|${days}`;
-    if (memory[key]) return;
-
-    const when = days < 0 ? `venceu há ${Math.abs(days)} dia${Math.abs(days) !== 1 ? 's' : ''}`
-      : days === 0 ? 'vence hoje'
-      : days === 1 ? 'vence amanhã'
-      : 'vence em 3 dias';
-
-    showAppNotification('FamFinance: lembrete de conta', {
-      body: `${bill.name} ${when} — ${fmt(bill.amount)}`,
-      icon: './manifest.json',
-      badge: './manifest.json',
-      tag: `famfinance-${bill.id}-${todayKey}`,
-      renotify: false,
-      data: { url: './index.html' }
-    });
-    memory[key] = true;
-  });
-
-  saveNotificationMemory(memory);
-}
-
-// ── PWA UPDATE HANDLER ───────────────────────────────────────────────────────
-function setupPwaUpdates() {
-  if (!('serviceWorker' in navigator)) return;
-
-  let refreshing = false;
-
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (refreshing) return;
-    refreshing = true;
-    window.location.reload();
-  });
-
-  function activateNewWorker(registration) {
-    if (registration && registration.waiting) {
-      registration.waiting.postMessage({ type: 'SKIP_WAITING' });
-    }
-  }
-
-  navigator.serviceWorker.register('sw.js').then(registration => {
-    registration.update();
-    activateNewWorker(registration);
-
-    registration.addEventListener('updatefound', () => {
-      const newWorker = registration.installing;
-      if (!newWorker) return;
-
-      newWorker.addEventListener('statechange', () => {
-        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-          newWorker.postMessage({ type: 'SKIP_WAITING' });
-        }
-      });
-    });
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') registration.update();
-    });
-
-    setInterval(() => registration.update(), 60 * 60 * 1000);
-  }).catch(() => {});
-}
-
 // ── INIT ──────────────────────────────────────────────────────────────────────
 function init() {
   load();
-  cleanupOldDeletedBills();
+  if (typeof cleanupTrash === 'function') cleanupTrash();
 
   $('prevMonth').addEventListener('click', () => changeMonth(-1));
   $('nextMonth').addEventListener('click', () => changeMonth(1));
@@ -873,13 +790,11 @@ function init() {
     chip.classList.add('active'); activeFilter = chip.dataset.f; renderBills();
   }));
 
-  setupPwaUpdates();
-  askNotificationPermission();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js?v=8').then(reg => reg.update()).catch(() => {});
+  }
 
   render();
-  checkDueNotifications();
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkDueNotifications(); });
-  setInterval(checkDueNotifications, 6 * 60 * 60 * 1000);
 }
 
 document.addEventListener('DOMContentLoaded', init);
