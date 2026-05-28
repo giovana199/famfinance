@@ -123,6 +123,28 @@
         </div>
       </div>
 
+
+      <div class="fg">
+        <label class="fl">Tipo de conta</label>
+        <div class="type-row">
+          <button type="button" class="type-chip active" data-type="single">Única</button>
+          <button type="button" class="type-chip" data-type="recurring">Recorrente</button>
+          <button type="button" class="type-chip" data-type="installment">Parcelada</button>
+        </div>
+        <input type="hidden" id="fType" value="single">
+      </div>
+
+      <div class="frow" id="installmentFields" style="display:none">
+        <div class="fg">
+          <label class="fl">Quantidade de parcelas</label>
+          <input class="fi" type="number" id="fInstallments" value="2" min="2" max="120" step="1">
+        </div>
+        <div class="fg">
+          <label class="fl">Valor por parcela</label>
+          <input class="fi" type="text" value="Mesmo valor" disabled>
+        </div>
+      </div>
+
       <div class="fg">
         <label class="fl">Categoria</label>
         <div class="cat-grid" id="catGrid"></div>

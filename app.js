@@ -1,6 +1,7 @@
 /* ── FamFinance app.js ── */
 
-const STORAGE_KEY = "famfinance_v2";   // same key → existing data preserved
+const STORAGE_KEY = "famfinance_v3";
+const LEGACY_KEYS = ["famfinance_v2"];
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
 const CATS = [
@@ -34,17 +35,76 @@ let curYear  = new Date().getFullYear();
 let activeFilter = 'all';
 let editingId    = null;
 let selectedCat  = 'Outros';
+let selectedType = 'single';
 let catChart     = null;
 
 // ── HELPERS ───────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
+function uid(prefix = 'id') {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function pad(n) { return String(n).padStart(2, '0'); }
+function ymKey(year, month) { return `${year}-${pad(month + 1)}`; }
+
+function parseLocalDate(dateStr) {
+  return new Date(dateStr + 'T12:00:00');
+}
+
+function daysInMonth(year, month) {
+  return new Date(year, month + 1, 0).getDate();
+}
+
+function makeDateForMonth(year, month, preferredDay) {
+  const day = Math.min(Number(preferredDay) || 1, daysInMonth(year, month));
+  return `${year}-${pad(month + 1)}-${pad(day)}`;
+}
+
+function addMonths(dateStr, offset) {
+  const d = parseLocalDate(dateStr);
+  return makeDateForMonth(d.getFullYear(), d.getMonth() + offset, d.getDate());
+}
+
+function monthDiff(fromDateStr, year, month) {
+  const from = parseLocalDate(fromDateStr);
+  return (year - from.getFullYear()) * 12 + (month - from.getMonth());
+}
+
+function normalizeBill(raw) {
+  const b = { ...raw };
+  if (!b.id) b.id = uid('bill');
+  if (!b.category) b.category = 'Outros';
+  if (!b.type) b.type = b.recurring ? 'recurring' : 'single';
+  if (b.type === 'recurring') {
+    if (!b.seriesId) b.seriesId = uid('rec');
+    if (!b.baseDate) b.baseDate = b.date;
+    if (!b.dayOfMonth) b.dayOfMonth = parseLocalDate(b.date).getDate();
+    b.repeatForever = b.repeatForever !== false;
+    b.recurring = true;
+  }
+  if (b.type === 'installment') {
+    if (!b.seriesId) b.seriesId = uid('inst');
+    b.installmentCurrent = Number(b.installmentCurrent || 1);
+    b.installmentTotal = Number(b.installmentTotal || 1);
+    b.recurring = false;
+  }
+  b.amount = Number(b.amount || 0);
+  b.paid = Boolean(b.paid);
+  return b;
+}
+
 function load() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    bills = raw ? JSON.parse(raw) : [];
-    // Migrate old bills that have no category
-    bills.forEach(b => { if (!b.category) b.category = 'Outros'; });
+    let raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      for (const key of LEGACY_KEYS) {
+        raw = localStorage.getItem(key);
+        if (raw) break;
+      }
+    }
+    bills = raw ? JSON.parse(raw).map(normalizeBill) : [];
+    save();
   } catch(e) { bills = []; }
 }
 
@@ -58,20 +118,77 @@ function fmt(v) {
 
 function getStatus(bill) {
   if (bill.paid) return 'paid';
-  const due   = new Date(bill.date + 'T12:00:00');
+  const due   = parseLocalDate(bill.date);
   const today = new Date(); today.setHours(0,0,0,0);
   return due < today ? 'overdue' : 'pending';
 }
 
 function daysUntil(dateStr) {
-  const due   = new Date(dateStr + 'T12:00:00');
+  const due   = parseLocalDate(dateStr);
   const today = new Date(); today.setHours(0,0,0,0);
   return Math.ceil((due - today) / 864e5);
 }
 
+function occurrenceKey(b) {
+  if (b.type === 'recurring') return `${b.seriesId}|${ymKey(parseLocalDate(b.date).getFullYear(), parseLocalDate(b.date).getMonth())}`;
+  if (b.type === 'installment') return `${b.seriesId}|${b.installmentCurrent}`;
+  return String(b.id);
+}
+
+function recurringSources() {
+  const map = new Map();
+  bills.filter(b => b.type === 'recurring').forEach(b => {
+    const current = map.get(b.seriesId);
+    if (!current || parseLocalDate(b.baseDate || b.date) < parseLocalDate(current.baseDate || current.date)) {
+      map.set(b.seriesId, b);
+    }
+  });
+  return [...map.values()];
+}
+
+function hasRecurringOccurrence(seriesId, year, month) {
+  const key = ymKey(year, month);
+  return bills.some(b => {
+    if (b.type !== 'recurring' || b.seriesId !== seriesId) return false;
+    const d = parseLocalDate(b.date);
+    return ymKey(d.getFullYear(), d.getMonth()) === key;
+  });
+}
+
+function ensureGeneratedForMonth(year = curYear, month = curMonth) {
+  let changed = false;
+
+  recurringSources().forEach(src => {
+    const baseDate = src.baseDate || src.date;
+    if (monthDiff(baseDate, year, month) < 0) return;
+    if (hasRecurringOccurrence(src.seriesId, year, month)) return;
+
+    bills.push({
+      id: uid('bill'),
+      type: 'recurring',
+      seriesId: src.seriesId,
+      generated: true,
+      generatedFrom: src.id,
+      name: src.name,
+      amount: src.amount,
+      date: makeDateForMonth(year, month, src.dayOfMonth || parseLocalDate(baseDate).getDate()),
+      baseDate,
+      dayOfMonth: src.dayOfMonth || parseLocalDate(baseDate).getDate(),
+      category: src.category,
+      recurring: true,
+      repeatForever: true,
+      paid: false,
+    });
+    changed = true;
+  });
+
+  if (changed) save();
+}
+
 function billsForMonth() {
+  ensureGeneratedForMonth(curYear, curMonth);
   return bills.filter(b => {
-    const d = new Date(b.date + 'T12:00:00');
+    const d = parseLocalDate(b.date);
     return d.getMonth() === curMonth && d.getFullYear() === curYear;
   });
 }
@@ -116,10 +233,9 @@ function renderDashboard() {
     ' pendente' + (pend.length !== 1 ? 's' : '');
   $('pfill').style.width       = total > 0 ? Math.round(paidT / total * 100) + '%' : '0%';
 
-  // Alerts: bills due in ≤ 5 days
   const alerts = bills
     .filter(b => { if (b.paid) return false; const d = daysUntil(b.date); return d >= 0 && d <= 5; })
-    .sort((a, b) => new Date(a.date) - new Date(b.date))
+    .sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date))
     .slice(0, 3);
 
   if (alerts.length) {
@@ -142,7 +258,6 @@ function renderDashboard() {
 }
 
 function renderChart(mb) {
-  // Aggregate by category
   const agg = {};
   mb.forEach(b => {
     const cat = b.category || 'Outros';
@@ -169,35 +284,16 @@ function renderChart(mb) {
 
   catChart = new Chart(ctx, {
     type: 'doughnut',
-    data: {
-      labels,
-      datasets: [{
-        data,
-        backgroundColor: colors,
-        borderWidth: 0,
-        hoverOffset: 10,
-        borderRadius: 4,
-      }],
-    },
+    data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 0, hoverOffset: 10, borderRadius: 4 }] },
     options: {
       responsive: true,
       cutout: '68%',
       animation: { duration: 600, easing: 'easeInOutQuart' },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => ' ' + fmt(ctx.raw),
-          },
-        },
-      },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ' ' + fmt(ctx.raw) } } },
     },
   });
 
-  $('chartCenter').innerHTML = `
-    <span class="ct-val">${fmt(total)}</span>
-    <span class="ct-lbl">total</span>
-  `;
+  $('chartCenter').innerHTML = `<span class="ct-val">${fmt(total)}</span><span class="ct-lbl">total</span>`;
 
   $('catLegend').innerHTML = labels.map((l, i) => {
     const cat = CATS.find(c => c.n === l) || CATS[9];
@@ -212,6 +308,12 @@ function renderChart(mb) {
   }).join('');
 }
 
+function typeLabel(b) {
+  if (b.type === 'recurring') return ' · 🔁 recorrente';
+  if (b.type === 'installment') return ` · 💳 ${b.installmentCurrent}/${b.installmentTotal}`;
+  return '';
+}
+
 function renderBills() {
   const listEl = $('list');
   let filtered = billsForMonth();
@@ -220,7 +322,7 @@ function renderBills() {
   if (activeFilter === 'pending') filtered = filtered.filter(b => !b.paid && getStatus(b) === 'pending');
   if (activeFilter === 'overdue') filtered = filtered.filter(b => getStatus(b) === 'overdue');
 
-  filtered.sort((a, b) => new Date(a.date) - new Date(b.date));
+  filtered.sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
 
   if (!filtered.length) {
     listEl.innerHTML = '<div class="empty">😊<br>Nenhuma conta aqui!</div>';
@@ -234,11 +336,10 @@ function renderBills() {
     const cat    = CATS.find(c => c.n === b.category) || CATS[9];
     const stLbl  = st === 'paid' ? 'Pago' : st === 'overdue' ? 'Vencida' : 'Pendente';
     const valClr = st === 'paid' ? '#00d4aa' : st === 'overdue' ? '#ff6b6b' : '#f0eff8';
-    const dateStr = new Date(b.date + 'T12:00:00').toLocaleDateString('pt-BR');
+    const dateStr = parseLocalDate(b.date).toLocaleDateString('pt-BR');
 
     const wrapper = document.createElement('div');
     wrapper.className = 'bill-wrapper';
-
     wrapper.innerHTML = `
       <div class="swipe-bg">
         <span class="swipe-del-lbl">🗑 Excluir</span>
@@ -248,7 +349,7 @@ function renderBills() {
         <div class="bill-cat">${cat.e}</div>
         <div class="bill-info">
           <div class="bill-name">${b.name}</div>
-          <div class="bill-meta">📅 ${dateStr}</div>
+          <div class="bill-meta">📅 ${dateStr}${typeLabel(b)}</div>
         </div>
         <div class="bill-right">
           <div class="bill-val" style="color:${valClr}">${fmt(b.amount)}</div>
@@ -264,26 +365,21 @@ function renderBills() {
     const item = wrapper.querySelector('.bill-item');
     listEl.appendChild(wrapper);
 
-    // Button events
     wrapper.querySelector('.pay-ibtn').addEventListener('click', e => { e.stopPropagation(); togglePaid(b.id); });
     wrapper.querySelector('.edit-ibtn').addEventListener('click', e => { e.stopPropagation(); openEdit(b.id); });
     wrapper.querySelector('.del-ibtn').addEventListener('click', e => { e.stopPropagation(); deleteBill(b.id); });
 
-    // Swipe-to-action
-    setupSwipe(item, wrapper, b.id, b.paid);
+    setupSwipe(item, wrapper, b.id);
   });
 }
 
 // ── SWIPE GESTURES ─────────────────────────────────────────────────────────────
-function setupSwipe(item, wrapper, id, isPaid) {
+function setupSwipe(item, wrapper, id) {
   let startX = 0, startY = 0, curX = 0, active = false;
   const THRESHOLD = 75;
 
   item.addEventListener('touchstart', e => {
-    startX  = e.touches[0].clientX;
-    startY  = e.touches[0].clientY;
-    active  = true;
-    curX    = 0;
+    startX = e.touches[0].clientX; startY = e.touches[0].clientY; active = true; curX = 0;
     item.style.transition = 'none';
   }, { passive: true });
 
@@ -291,41 +387,26 @@ function setupSwipe(item, wrapper, id, isPaid) {
     if (!active) return;
     const dx = e.touches[0].clientX - startX;
     const dy = e.touches[0].clientY - startY;
-    if (Math.abs(dy) > Math.abs(dx) + 5) { active = false; return; } // vertical scroll
-    curX = dx;
-    item.style.transform = `translateX(${dx}px)`;
-
-    // Tint the background based on direction
+    if (Math.abs(dy) > Math.abs(dx) + 5) { active = false; return; }
+    curX = dx; item.style.transform = `translateX(${dx}px)`;
     const ratio = Math.min(Math.abs(dx) / THRESHOLD, 1);
-    if (dx > 0) wrapper.style.background = `rgba(0,212,170,${ratio * 0.25})`;  // green = pay
-    else        wrapper.style.background = `rgba(255,107,107,${ratio * 0.25})`; // red  = delete
+    wrapper.style.background = dx > 0 ? `rgba(0,212,170,${ratio * 0.25})` : `rgba(255,107,107,${ratio * 0.25})`;
   }, { passive: true });
 
   item.addEventListener('touchend', () => {
     if (!active) return;
-    active = false;
-    item.style.transition = 'transform .25s ease';
-    wrapper.style.background = '';
-
+    active = false; item.style.transition = 'transform .25s ease'; wrapper.style.background = '';
     if (curX > THRESHOLD) {
-      // Swipe right → mark paid
       item.style.transform = 'translateX(110%)';
       setTimeout(() => { togglePaid(id); item.style.transform = ''; }, 220);
     } else if (curX < -THRESHOLD) {
-      // Swipe left → delete
       item.style.transform = 'translateX(-110%)';
       setTimeout(() => { deleteBill(id); }, 220);
-    } else {
-      item.style.transform = '';
-    }
+    } else item.style.transform = '';
     curX = 0;
   });
 
-  item.addEventListener('touchcancel', () => {
-    active = false;
-    item.style.transform = '';
-    wrapper.style.background = '';
-  });
+  item.addEventListener('touchcancel', () => { active = false; item.style.transform = ''; wrapper.style.background = ''; });
 }
 
 // ── BILL ACTIONS ──────────────────────────────────────────────────────────────
@@ -335,21 +416,37 @@ function togglePaid(id) {
 }
 
 function deleteBill(id) {
-  if (!confirm('Excluir esta conta?')) return;
+  const b = bills.find(x => x.id === id);
+  if (!b) return;
+
+  let msg = 'Excluir esta conta?';
+  if (b.type === 'recurring') msg = 'Excluir apenas esta ocorrência recorrente? As próximas continuam sendo geradas.';
+  if (b.type === 'installment') msg = 'Excluir apenas esta parcela? As outras parcelas serão mantidas.';
+  if (!confirm(msg)) return;
+
   bills = bills.filter(x => x.id !== id);
   save(); render();
 }
 
 // ── MODAL: ADD / EDIT ─────────────────────────────────────────────────────────
+function setType(type) {
+  selectedType = type;
+  $('fType').value = type;
+  $('installmentFields').style.display = type === 'installment' ? 'grid' : 'none';
+  $('fRec').checked = type === 'recurring';
+  document.querySelectorAll('.type-chip').forEach(btn => btn.classList.toggle('active', btn.dataset.type === type));
+}
+
 function openAdd() {
-  editingId   = null;
+  editingId = null;
   selectedCat = 'Outros';
   $('modalTitle').textContent = 'Nova conta';
-  $('saveBtn').textContent    = '✓  Adicionar conta';
-  $('fName').value    = '';
-  $('fAmount').value  = '';
-  $('fDate').value    = new Date().toISOString().split('T')[0];
-  $('fRec').checked   = false;
+  $('saveBtn').textContent = '✓  Adicionar conta';
+  $('fName').value = '';
+  $('fAmount').value = '';
+  $('fDate').value = new Date().toISOString().split('T')[0];
+  $('fInstallments').value = 2;
+  setType('single');
   renderCatGrid();
   $('billModal').style.display = 'flex';
   setTimeout(() => $('fName').focus(), 300);
@@ -358,23 +455,22 @@ function openAdd() {
 function openEdit(id) {
   const b = bills.find(x => x.id === id);
   if (!b) return;
-  editingId   = id;
+  editingId = id;
   selectedCat = b.category || 'Outros';
   $('modalTitle').textContent = 'Editar conta';
-  $('saveBtn').textContent    = '✓  Salvar alterações';
-  $('fName').value    = b.name;
-  $('fAmount').value  = b.amount;
-  $('fDate').value    = b.date;
-  $('fRec').checked   = b.recurring || false;
+  $('saveBtn').textContent = '✓  Salvar alterações';
+  $('fName').value = b.name;
+  $('fAmount').value = b.amount;
+  $('fDate').value = b.date;
+  $('fInstallments').value = b.installmentTotal || 2;
+  setType(b.type || (b.recurring ? 'recurring' : 'single'));
   renderCatGrid();
   $('billModal').style.display = 'flex';
 }
 
 function renderCatGrid() {
   $('catGrid').innerHTML = CATS.map(c =>
-    `<div class="cat-btn${selectedCat === c.n ? ' active' : ''}" data-cat="${c.n}">
-       ${c.e}<span>${c.n}</span>
-     </div>`
+    `<div class="cat-btn${selectedCat === c.n ? ' active' : ''}" data-cat="${c.n}">${c.e}<span>${c.n}</span></div>`
   ).join('');
   $('catGrid').querySelectorAll('.cat-btn').forEach(el => {
     el.addEventListener('click', () => {
@@ -385,22 +481,71 @@ function renderCatGrid() {
   });
 }
 
+function buildInstallments({ name, amount, date, category, total }) {
+  const seriesId = uid('inst');
+  const count = Math.max(1, Number(total || 1));
+  return Array.from({ length: count }, (_, i) => ({
+    id: uid('bill'),
+    type: 'installment',
+    seriesId,
+    name,
+    amount,
+    date: addMonths(date, i),
+    category,
+    paid: false,
+    recurring: false,
+    installmentCurrent: i + 1,
+    installmentTotal: count,
+  }));
+}
+
 function saveBill() {
   const name   = $('fName').value.trim();
   const amount = parseFloat($('fAmount').value);
   const date   = $('fDate').value;
-  const rec    = $('fRec').checked;
+  const type   = $('fType').value || 'single';
+  const installments = parseInt($('fInstallments').value, 10);
 
   if (!name || isNaN(amount) || amount <= 0 || !date) {
     alert('Preencha nome, valor e vencimento corretamente.');
     return;
   }
+  if (type === 'installment' && (!installments || installments < 2)) {
+    alert('Informe pelo menos 2 parcelas.');
+    return;
+  }
 
   if (editingId) {
     const b = bills.find(x => x.id === editingId);
-    if (b) Object.assign(b, { name, amount, date, category: selectedCat, recurring: rec });
+    if (b) {
+      Object.assign(b, {
+        name, amount, date, category: selectedCat, type,
+        recurring: type === 'recurring',
+        repeatForever: type === 'recurring',
+        dayOfMonth: parseLocalDate(date).getDate(),
+        baseDate: type === 'recurring' ? (b.baseDate || date) : undefined,
+      });
+      if (type === 'installment') {
+        b.installmentTotal = b.installmentTotal || installments;
+        b.installmentCurrent = b.installmentCurrent || 1;
+        b.seriesId = b.seriesId || uid('inst');
+      }
+      if (type === 'recurring') b.seriesId = b.seriesId || uid('rec');
+    }
+  } else if (type === 'installment') {
+    bills.push(...buildInstallments({ name, amount, date, category: selectedCat, total: installments }));
   } else {
-    bills.push({ id: Date.now(), name, amount, date, category: selectedCat, recurring: rec, paid: false });
+    const base = {
+      id: uid('bill'), name, amount, date, category: selectedCat,
+      type, paid: false, recurring: type === 'recurring',
+    };
+    if (type === 'recurring') {
+      base.seriesId = uid('rec');
+      base.baseDate = date;
+      base.dayOfMonth = parseLocalDate(date).getDate();
+      base.repeatForever = true;
+    }
+    bills.push(base);
   }
 
   save();
@@ -415,13 +560,12 @@ function closeBillModal() {
 
 // ── WHATSAPP ──────────────────────────────────────────────────────────────────
 function openWpp() {
-  const pend   = bills.filter(b => !b.paid).sort((a, b) => new Date(a.date) - new Date(b.date));
+  ensureGeneratedForMonth(curYear, curMonth);
+  const currentMonthBills = billsForMonth();
+  const pend = currentMonthBills.filter(b => !b.paid).sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
   const overdue = pend.filter(b => getStatus(b) === 'overdue');
   const upcoming = pend.filter(b => getStatus(b) === 'pending');
-  const paidInMonth = bills.filter(b => {
-    const d = new Date(b.date + 'T12:00:00');
-    return b.paid && d.getMonth() === curMonth && d.getFullYear() === curYear;
-  });
+  const paidInMonth = currentMonthBills.filter(b => b.paid);
 
   let msg = '💰 *FamFinance – Resumo de Contas*\n';
   msg += `📅 ${MONTHS[curMonth]} ${curYear}\n\n`;
@@ -448,19 +592,12 @@ function openWpp() {
   msg += `💳 *Total pendente: ${fmt(pendTotal)}*`;
 
   const enc = encodeURIComponent(msg);
-
-  // Render preview (escaping HTML but keeping bold markers visual)
-  const preview = msg
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/\*(.*?)\*/g, '<strong>$1</strong>')
-    .replace(/\n/g, '<br>');
+  const preview = msg.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\*(.*?)\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
 
   $('wppContent').innerHTML = `
     <div class="wpp-preview">${preview}</div>
     <p class="wpp-tip">O WhatsApp vai abrir com a mensagem pronta — escolha o contato ou grupo.</p>
-    <a class="wpp-open-btn" href="https://wa.me/?text=${enc}" target="_blank" rel="noopener">
-      📱 Abrir no WhatsApp
-    </a>`;
+    <a class="wpp-open-btn" href="https://wa.me/?text=${enc}" target="_blank" rel="noopener">📱 Abrir no WhatsApp</a>`;
 
   $('wppModal').style.display = 'flex';
 }
@@ -478,45 +615,34 @@ function exportData() {
 function init() {
   load();
 
-  // Month navigation
   $('prevMonth').addEventListener('click', () => changeMonth(-1));
   $('nextMonth').addEventListener('click', () => changeMonth(1));
 
-  // Bottom nav
-  document.querySelectorAll('.nav-btn').forEach(btn =>
-    btn.addEventListener('click', () => setView(btn.dataset.view))
-  );
-
-  // FAB → open add modal
+  document.querySelectorAll('.nav-btn').forEach(btn => btn.addEventListener('click', () => setView(btn.dataset.view)));
   $('fabBtn').addEventListener('click', openAdd);
 
-  // Bill modal
   $('closeBillModal').addEventListener('click', closeBillModal);
   $('saveBtn').addEventListener('click', saveBill);
   $('billModal').addEventListener('click', e => { if (e.target === $('billModal')) closeBillModal(); });
 
-  // WhatsApp modal
+  document.querySelectorAll('.type-chip').forEach(btn => btn.addEventListener('click', () => setType(btn.dataset.type)));
+  $('fRec').addEventListener('change', () => setType($('fRec').checked ? 'recurring' : 'single'));
+
   $('wppBtn').addEventListener('click', openWpp);
   $('closeWpp').addEventListener('click', () => { $('wppModal').style.display = 'none'; });
   $('wppModal').addEventListener('click', e => { if (e.target === $('wppModal')) $('wppModal').style.display = 'none'; });
 
-  // Export
   $('exportBtn').addEventListener('click', exportData);
 
-  // Filter chips
-  document.querySelectorAll('.fchip').forEach(chip =>
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('.fchip').forEach(c => c.classList.remove('active'));
-      chip.classList.add('active');
-      activeFilter = chip.dataset.f;
-      renderBills();
-    })
-  );
+  document.querySelectorAll('.fchip').forEach(chip => chip.addEventListener('click', () => {
+    document.querySelectorAll('.fchip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active'); activeFilter = chip.dataset.f; renderBills();
+  }));
 
-  // Service Worker (PWA)
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then(reg => reg.update()).catch(() => {});
+  }
 
-  // Initial render
   render();
 }
 

@@ -712,3 +712,32 @@ body {
   .cat-grid { grid-template-columns: repeat(5, 1fr); gap: 4px; }
   .cat-btn { padding: 9px 4px; font-size: 1rem; }
 }
+
+/* ── BILL TYPE ── */
+.type-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.type-chip {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 11px 6px;
+  color: var(--text2);
+  font-family: inherit;
+  font-weight: 700;
+  font-size: .72rem;
+  cursor: pointer;
+  transition: .15s;
+}
+
+.type-chip.active {
+  background: rgba(167,139,250,.13);
+  border-color: var(--purple);
+  color: var(--purple);
+}
+
+.type-chip:active { opacity: .8; }
+.fi:disabled { opacity: .7; color: var(--text3); }
