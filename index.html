@@ -4,18 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>FamFinance</title>
-  <link rel="manifest" href="manifest.json?v=10">
-  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=10">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=10">
+  <link rel="manifest" href="manifest.json?v=11">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=11">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=11">
   <meta name="theme-color" content="#8b5cf6">
-  <link rel="stylesheet" href="styles.css?v=10">
+  <link rel="stylesheet" href="styles.css?v=11">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
   <!-- HEADER -->
   <header class="header">
-    <div class="logo"><img src="icon-192.png?v=10" alt="" class="app-logo-icon"> <span>FamFinance</span></div>
+    <div class="logo"><img src="icon-192.png?v=11" alt="" class="app-logo-icon"> <span>FamFinance</span></div>
     <div class="header-actions">
       <button class="hbtn wpp-btn-hdr" id="wppBtn">📱 WhatsApp</button>
       <button class="hbtn" id="exportBtn">📤</button>
@@ -53,6 +53,12 @@
         </div>
       </div>
 
+      <!-- Monthly Summary -->
+      <div id="monthlySummarySection" class="section">
+        <div class="section-title">📌 Resumo mensal inteligente</div>
+        <div id="monthlySummaryCard" class="monthly-summary-card"></div>
+      </div>
+
       <!-- Alerts -->
       <div id="alertsSection" style="display:none" class="section">
         <div class="section-title">⚠️ Vencendo em breve</div>
@@ -80,6 +86,7 @@
         <button class="fchip" data-f="pending">Pendentes</button>
         <button class="fchip" data-f="overdue">Vencidas</button>
         <button class="fchip" data-f="paid">Pagas</button>
+        <button class="fchip" data-f="trash">Lixeira</button>
       </div>
       <p class="swipe-hint">← deslize para excluir &nbsp;·&nbsp; deslize para pagar →</p>
       <div id="list"></div>
@@ -174,6 +181,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

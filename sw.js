@@ -1,14 +1,14 @@
-const CACHE_NAME = "famfinance-cache-v10";
+const CACHE_NAME = "famfinance-cache-v11";
 const APP_SHELL = [
   "./",
-  "./index.html?v=10",
-  "./styles.css?v=10",
-  "./app.js?v=10",
-  "./manifest.json?v=10",
-  "./icon-192.png?v=10",
-  "./icon-512.png?v=10",
-  "./apple-touch-icon.png?v=10",
-  "./favicon-32.png?v=10"
+  "./index.html?v=11",
+  "./styles.css?v=11",
+  "./app.js?v=11",
+  "./manifest.json?v=11",
+  "./icon-192.png?v=11",
+  "./icon-512.png?v=11",
+  "./apple-touch-icon.png?v=11",
+  "./favicon-32.png?v=11"
 ];
 
 self.addEventListener("install", event => {
@@ -23,6 +23,10 @@ self.addEventListener("activate", event => {
   self.clients.claim();
 });
 
+self.addEventListener("message", event => {
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
+});
+
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   event.respondWith(
@@ -32,6 +36,6 @@ self.addEventListener("fetch", event => {
         caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
         return response;
       })
-      .catch(() => caches.match(event.request).then(response => response || caches.match("./index.html")))
+      .catch(() => caches.match(event.request).then(response => response || caches.match("./index.html?v=11") || caches.match("./index.html")))
   );
 });
