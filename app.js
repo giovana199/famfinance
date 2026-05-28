@@ -81,6 +81,7 @@ function normalizeBill(raw) {
     if (!b.baseDate) b.baseDate = b.date;
     if (!b.dayOfMonth) b.dayOfMonth = parseLocalDate(b.date).getDate();
     b.repeatForever = b.repeatForever !== false;
+    b.recurrenceDisabled = Boolean(b.recurrenceDisabled);
     b.recurring = true;
   }
   if (b.type === 'installment') {
@@ -139,7 +140,7 @@ function occurrenceKey(b) {
 
 function recurringSources() {
   const map = new Map();
-  bills.filter(b => b.type === 'recurring' && !b.deleted).forEach(b => {
+  bills.filter(b => b.type === 'recurring' && !b.recurrenceDisabled).forEach(b => {
     const current = map.get(b.seriesId);
     if (!current || parseLocalDate(b.baseDate || b.date) < parseLocalDate(current.baseDate || current.date)) {
       map.set(b.seriesId, b);
@@ -426,16 +427,24 @@ function typeLabel(b) {
 
 function renderBills() {
   const listEl = $('list');
-  let filtered = billsForMonth();
+  let filtered;
+  const showingTrash = activeFilter === 'trash';
 
-  if (activeFilter === 'paid')    filtered = filtered.filter(b => b.paid);
-  if (activeFilter === 'pending') filtered = filtered.filter(b => !b.paid && getStatus(b) === 'pending');
-  if (activeFilter === 'overdue') filtered = filtered.filter(b => getStatus(b) === 'overdue');
+  if (showingTrash) {
+    filtered = bills.filter(b => b.deleted);
+  } else {
+    filtered = billsForMonth();
+    if (activeFilter === 'paid')    filtered = filtered.filter(b => b.paid);
+    if (activeFilter === 'pending') filtered = filtered.filter(b => !b.paid && getStatus(b) === 'pending');
+    if (activeFilter === 'overdue') filtered = filtered.filter(b => getStatus(b) === 'overdue');
+  }
 
   filtered.sort((a, b) => parseLocalDate(a.date) - parseLocalDate(b.date));
 
   if (!filtered.length) {
-    listEl.innerHTML = '<div class="empty">😊<br>Nenhuma conta aqui!</div>';
+    listEl.innerHTML = showingTrash
+      ? '<div class="empty">🗑<br>Lixeira vazia!</div>'
+      : '<div class="empty">😊<br>Nenhuma conta aqui!</div>';
     return;
   }
 
@@ -444,12 +453,39 @@ function renderBills() {
   filtered.forEach(b => {
     const st     = getStatus(b);
     const cat    = CATS.find(c => c.n === b.category) || CATS[9];
-    const stLbl  = st === 'paid' ? 'Pago' : st === 'overdue' ? 'Vencida' : 'Pendente';
-    const valClr = st === 'paid' ? '#00d4aa' : st === 'overdue' ? '#ff6b6b' : '#f0eff8';
+    const stLbl  = b.deleted ? 'Na lixeira' : st === 'paid' ? 'Pago' : st === 'overdue' ? 'Vencida' : 'Pendente';
+    const valClr = b.deleted ? '#9998b8' : st === 'paid' ? '#00d4aa' : st === 'overdue' ? '#ff6b6b' : '#f0eff8';
     const dateStr = parseLocalDate(b.date).toLocaleDateString('pt-BR');
+    const deletedInfo = b.deletedAt ? `<div class="bill-meta trash-meta">🗑 excluída em ${new Date(b.deletedAt).toLocaleDateString('pt-BR')} · fica por 7 dias</div>` : '';
 
     const wrapper = document.createElement('div');
     wrapper.className = 'bill-wrapper';
+
+    if (showingTrash) {
+      wrapper.innerHTML = `
+        <div class="bill-item trash-item" data-id="${b.id}">
+          <div class="bill-cat">${cat.e}</div>
+          <div class="bill-info">
+            <div class="bill-name">${b.name}</div>
+            <div class="bill-meta">📅 ${dateStr}${typeLabel(b)}</div>
+            ${deletedInfo}
+          </div>
+          <div class="bill-right">
+            <div class="bill-val" style="color:${valClr}">${fmt(b.amount)}</div>
+            <span class="bst s-pending">${stLbl}</span>
+          </div>
+          <div class="bill-acts">
+            <button class="ibtn restore-ibtn" title="Restaurar">↩️</button>
+            <button class="ibtn hard-del-ibtn" title="Excluir definitivamente">🧨</button>
+          </div>
+        </div>`;
+
+      listEl.appendChild(wrapper);
+      wrapper.querySelector('.restore-ibtn').addEventListener('click', e => { e.stopPropagation(); restoreBill(b.id); });
+      wrapper.querySelector('.hard-del-ibtn').addEventListener('click', e => { e.stopPropagation(); permanentDeleteBill(b.id); });
+      return;
+    }
+
     wrapper.innerHTML = `
       <div class="swipe-bg">
         <span class="swipe-del-lbl">🗑 Excluir</span>
@@ -537,6 +573,25 @@ function cleanupTrash() {
   if (bills.length !== before) save();
 }
 
+
+function restoreBill(id) {
+  const b = bills.find(x => x.id === id);
+  if (!b) return;
+  b.deleted = false;
+  b.deletedAt = null;
+  save();
+  render();
+}
+
+function permanentDeleteBill(id) {
+  const b = bills.find(x => x.id === id);
+  if (!b) return;
+  if (!confirm('Excluir definitivamente esta conta? Essa ação não poderá ser desfeita.')) return;
+  bills = bills.filter(x => x.id !== id);
+  save();
+  render();
+}
+
 function deleteBill(id) {
   const b = bills.find(x => x.id === id);
   if (!b) return;
@@ -562,7 +617,7 @@ function deleteBill(id) {
         }
       });
     } else if (choice === '3') {
-      bills.forEach(x => { if (x.seriesId === b.seriesId && x.type === 'recurring') softDeleteBill(x); });
+      bills.forEach(x => { if (x.seriesId === b.seriesId && x.type === 'recurring') { x.recurrenceDisabled = true; softDeleteBill(x); } });
     } else {
       return;
     }

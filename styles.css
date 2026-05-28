@@ -849,3 +849,16 @@ body {
   transform: translateY(-1px) scale(1.08);
   filter: drop-shadow(0 0 8px rgba(167,139,250,.85));
 }
+
+/* Trash list */
+.trash-item {
+  opacity: .82;
+  border-style: dashed;
+}
+.trash-meta {
+  color: var(--text3);
+  margin-top: 2px;
+}
+.hard-del-ibtn {
+  opacity: .9;
+}
