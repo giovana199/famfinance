@@ -874,3 +874,5 @@ body {
 .hard-del-ibtn {
   opacity: .9;
 }
+
+.fi[readonly] { opacity: .92; color: var(--text2); }

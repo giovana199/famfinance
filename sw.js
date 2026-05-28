@@ -1,14 +1,14 @@
-const CACHE_NAME = "famfinance-cache-v11";
+const CACHE_NAME = "famfinance-cache-v12";
 const APP_SHELL = [
   "./",
-  "./index.html?v=11",
-  "./styles.css?v=11",
-  "./app.js?v=11",
-  "./manifest.json?v=11",
-  "./icon-192.png?v=11",
-  "./icon-512.png?v=11",
-  "./apple-touch-icon.png?v=11",
-  "./favicon-32.png?v=11"
+  "./index.html?v=12",
+  "./styles.css?v=12",
+  "./app.js?v=12",
+  "./manifest.json?v=12",
+  "./icon-192.png?v=12",
+  "./icon-512.png?v=12",
+  "./apple-touch-icon.png?v=12",
+  "./favicon-32.png?v=12"
 ];
 
 self.addEventListener("install", event => {
@@ -36,6 +36,6 @@ self.addEventListener("fetch", event => {
         caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
         return response;
       })
-      .catch(() => caches.match(event.request).then(response => response || caches.match("./index.html?v=11") || caches.match("./index.html")))
+      .catch(() => caches.match(event.request).then(response => response || caches.match("./index.html?v=12") || caches.match("./index.html")))
   );
 });

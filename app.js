@@ -1,4 +1,4 @@
-/* ── FamFinance app.js ── */
+/* ── FamFinance app.js v12 ── */
 
 const STORAGE_KEY = "famfinance_v3";
 const LEGACY_KEYS = ["famfinance_v2"];
@@ -88,6 +88,7 @@ function normalizeBill(raw) {
     if (!b.seriesId) b.seriesId = uid('inst');
     b.installmentCurrent = Number(b.installmentCurrent || 1);
     b.installmentTotal = Number(b.installmentTotal || 1);
+    if (!b.purchaseTotal) b.purchaseTotal = roundCents(Number(b.amount || 0) * b.installmentTotal);
     b.recurring = false;
   }
   b.amount = Number(b.amount || 0);
@@ -117,6 +118,16 @@ function save() {
 
 function fmt(v) {
   return Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+function parseMoneyInput(value) {
+  const raw = String(value || '').trim().replace(/\./g, '').replace(',', '.');
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function roundCents(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
 }
 
 function getStatus(bill) {
@@ -639,7 +650,16 @@ function setType(type) {
   $('fType').value = type;
   $('installmentFields').style.display = type === 'installment' ? 'grid' : 'none';
   $('fRec').checked = type === 'recurring';
+  $('amountLabel').textContent = type === 'installment' ? 'Valor total da compra (R$)' : 'Valor (R$)';
   document.querySelectorAll('.type-chip').forEach(btn => btn.classList.toggle('active', btn.dataset.type === type));
+  updateInstallmentPreview();
+}
+
+function updateInstallmentPreview() {
+  const total = parseMoneyInput($('fAmount').value);
+  const count = Math.max(1, parseInt($('fInstallments').value, 10) || 1);
+  const each = Number.isFinite(total) && total > 0 ? roundCents(total / count) : 0;
+  if ($('fInstallmentAmount')) $('fInstallmentAmount').value = fmt(each);
 }
 
 function openAdd() {
@@ -651,6 +671,7 @@ function openAdd() {
   $('fAmount').value = '';
   $('fDate').value = new Date().toISOString().split('T')[0];
   $('fInstallments').value = 2;
+  updateInstallmentPreview();
   setType('single');
   renderCatGrid();
   $('billModal').style.display = 'flex';
@@ -665,10 +686,11 @@ function openEdit(id) {
   $('modalTitle').textContent = 'Editar conta';
   $('saveBtn').textContent = '✓  Salvar alterações';
   $('fName').value = b.name;
-  $('fAmount').value = b.amount;
+  $('fAmount').value = b.type === 'installment' ? (b.purchaseTotal || roundCents(Number(b.amount || 0) * Number(b.installmentTotal || 1))) : b.amount;
   $('fDate').value = b.date;
   $('fInstallments').value = b.installmentTotal || 2;
   setType(b.type || (b.recurring ? 'recurring' : 'single'));
+  updateInstallmentPreview();
   renderCatGrid();
   $('billModal').style.display = 'flex';
 }
@@ -689,24 +711,37 @@ function renderCatGrid() {
 function buildInstallments({ name, amount, date, category, total }) {
   const seriesId = uid('inst');
   const count = Math.max(1, Number(total || 1));
-  return Array.from({ length: count }, (_, i) => ({
-    id: uid('bill'),
-    type: 'installment',
-    seriesId,
-    name,
-    amount,
-    date: addMonths(date, i),
-    category,
-    paid: false,
-    recurring: false,
-    installmentCurrent: i + 1,
-    installmentTotal: count,
-  }));
+  const purchaseTotal = roundCents(amount);
+  const baseValue = Math.floor((purchaseTotal / count) * 100) / 100;
+  const installments = [];
+  let accumulated = 0;
+
+  for (let i = 0; i < count; i++) {
+    let installmentAmount = i === count - 1 ? roundCents(purchaseTotal - accumulated) : roundCents(baseValue);
+    accumulated = roundCents(accumulated + installmentAmount);
+
+    installments.push({
+      id: uid('bill'),
+      type: 'installment',
+      seriesId,
+      name,
+      amount: installmentAmount,
+      purchaseTotal,
+      date: addMonths(date, i),
+      category,
+      paid: false,
+      recurring: false,
+      installmentCurrent: i + 1,
+      installmentTotal: count,
+    });
+  }
+
+  return installments;
 }
 
 function saveBill() {
   const name   = $('fName').value.trim();
-  const amount = parseFloat($('fAmount').value);
+  const amount = parseMoneyInput($('fAmount').value);
   const date   = $('fDate').value;
   const type   = $('fType').value || 'single';
   const installments = parseInt($('fInstallments').value, 10);
@@ -723,15 +758,16 @@ function saveBill() {
   if (editingId) {
     const b = bills.find(x => x.id === editingId);
     if (b) {
+      const finalAmount = type === 'installment' ? roundCents(amount / installments) : amount;
       Object.assign(b, {
-        name, amount, date, category: selectedCat, type,
+        name, amount: finalAmount, purchaseTotal: type === 'installment' ? roundCents(amount) : undefined, date, category: selectedCat, type,
         recurring: type === 'recurring',
         repeatForever: type === 'recurring',
         dayOfMonth: parseLocalDate(date).getDate(),
         baseDate: type === 'recurring' ? (b.baseDate || date) : undefined,
       });
       if (type === 'installment') {
-        b.installmentTotal = b.installmentTotal || installments;
+        b.installmentTotal = installments || b.installmentTotal || 1;
         b.installmentCurrent = b.installmentCurrent || 1;
         b.seriesId = b.seriesId || uid('inst');
       }
@@ -816,6 +852,34 @@ function exportData() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function importDataFromFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+
+  reader.onload = () => {
+    try {
+      const payload = JSON.parse(reader.result);
+      const importedBills = Array.isArray(payload) ? payload : Array.isArray(payload.bills) ? payload.bills : null;
+      if (!importedBills) {
+        alert('Arquivo inválido. Selecione um backup exportado pelo FamFinance.');
+        return;
+      }
+      if (!confirm('Importar este backup? Ele vai substituir os dados atuais deste aparelho.')) return;
+      bills = importedBills.map(normalizeBill);
+      save();
+      if (typeof cleanupTrash === 'function') cleanupTrash();
+      render();
+      alert('Backup importado com sucesso!');
+    } catch (e) {
+      alert('Não foi possível importar. Verifique se o arquivo é um .json válido do FamFinance.');
+    } finally {
+      if ($('importFile')) $('importFile').value = '';
+    }
+  };
+
+  reader.readAsText(file, 'utf-8');
+}
+
 // ── INIT ──────────────────────────────────────────────────────────────────────
 function init() {
   load();
@@ -839,6 +903,10 @@ function init() {
   $('wppModal').addEventListener('click', e => { if (e.target === $('wppModal')) $('wppModal').style.display = 'none'; });
 
   $('exportBtn').addEventListener('click', exportData);
+  $('importBtn').addEventListener('click', () => $('importFile').click());
+  $('importFile').addEventListener('change', e => importDataFromFile(e.target.files && e.target.files[0]));
+  $('fAmount').addEventListener('input', updateInstallmentPreview);
+  $('fInstallments').addEventListener('input', updateInstallmentPreview);
 
   document.querySelectorAll('.fchip').forEach(chip => chip.addEventListener('click', () => {
     document.querySelectorAll('.fchip').forEach(c => c.classList.remove('active'));
@@ -846,7 +914,7 @@ function init() {
   }));
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js?v=8').then(reg => reg.update()).catch(() => {});
+    navigator.serviceWorker.register('sw.js?v=12').then(reg => reg.update()).catch(() => {});
   }
 
   render();
