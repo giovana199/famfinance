@@ -1,7 +1,7 @@
 /* ── FamFinance app.js ── */
 
-const STORAGE_KEY = "famfinance_v4";
-const LEGACY_KEYS = ["famfinance_v3", "famfinance_v2"];
+const STORAGE_KEY = "famfinance_v5";
+const LEGACY_KEYS = ["famfinance_v4", "famfinance_v3", "famfinance_v2"];
 const NOTIFICATION_KEY = "famfinance_notifications_v1";
 const NOTIFICATION_ASKED_KEY = "famfinance_notifications_asked";
 
@@ -96,6 +96,8 @@ function normalizeBill(raw) {
   b.paidAt = b.paidAt || null;
   b.deleted = Boolean(b.deleted);
   b.deletedAt = b.deletedAt || null;
+  b.cancelledFrom = b.cancelledFrom || null;
+  b.cancelledAt = b.cancelledAt || null;
   return b;
 }
 
@@ -142,7 +144,7 @@ function occurrenceKey(b) {
 
 function recurringSources() {
   const map = new Map();
-  bills.filter(b => b.type === 'recurring').forEach(b => {
+  bills.filter(b => b.type === 'recurring' && !b.cancelledFrom).forEach(b => {
     const current = map.get(b.seriesId);
     if (!current || parseLocalDate(b.baseDate || b.date) < parseLocalDate(current.baseDate || current.date)) {
       map.set(b.seriesId, b);
@@ -166,6 +168,7 @@ function ensureGeneratedForMonth(year = curYear, month = curMonth) {
   recurringSources().forEach(src => {
     const baseDate = src.baseDate || src.date;
     if (monthDiff(baseDate, year, month) < 0) return;
+    if (src.cancelledFrom && ymKey(year, month) >= src.cancelledFrom) return;
     if (hasRecurringOccurrence(src.seriesId, year, month)) return;
 
     bills.push({
@@ -183,6 +186,11 @@ function ensureGeneratedForMonth(year = curYear, month = curMonth) {
       recurring: true,
       repeatForever: true,
       paid: false,
+      paidAt: null,
+      deleted: false,
+      deletedAt: null,
+      cancelledFrom: null,
+      cancelledAt: null,
     });
     changed = true;
   });
@@ -204,7 +212,7 @@ function allDeletedBills() {
 }
 
 function cleanupOldDeletedBills() {
-  const limit = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const limit = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const before = bills.length;
   bills = bills.filter(b => !b.deleted || !b.deletedAt || new Date(b.deletedAt).getTime() > limit);
   if (bills.length !== before) save();
@@ -451,17 +459,69 @@ function togglePaid(id) {
   render();
 }
 
+function softDeleteBill(b) {
+  b.deleted = true;
+  b.deletedAt = new Date().toISOString();
+}
+
+function deleteRecurringBill(b) {
+  const option = prompt(
+    'Esta conta é recorrente. O que deseja fazer?\n\n' +
+    '1 - Excluir somente este mês\n' +
+    '2 - Encerrar recorrência a partir deste mês\n' +
+    '3 - Excluir toda a recorrência\n\n' +
+    'Digite 1, 2 ou 3:',
+    '2'
+  );
+
+  if (option === null) return;
+  const choice = String(option).trim();
+  const currentYm = ymKey(parseLocalDate(b.date).getFullYear(), parseLocalDate(b.date).getMonth());
+  const now = new Date().toISOString();
+
+  if (choice === '1') {
+    softDeleteBill(b);
+  } else if (choice === '2') {
+    bills.forEach(x => {
+      if (x.type === 'recurring' && x.seriesId === b.seriesId) {
+        x.cancelledFrom = currentYm;
+        x.cancelledAt = now;
+        const xDate = parseLocalDate(x.date);
+        if (ymKey(xDate.getFullYear(), xDate.getMonth()) >= currentYm) softDeleteBill(x);
+      }
+    });
+  } else if (choice === '3') {
+    if (!confirm('Excluir toda a recorrência? Todas as ocorrências já criadas irão para a lixeira.')) return;
+    bills.forEach(x => {
+      if (x.type === 'recurring' && x.seriesId === b.seriesId) {
+        x.cancelledFrom = currentYm;
+        x.cancelledAt = now;
+        softDeleteBill(x);
+      }
+    });
+  } else {
+    alert('Opção inválida. A conta não foi excluída.');
+    return;
+  }
+
+  save();
+  render();
+}
+
 function deleteBill(id) {
   const b = bills.find(x => x.id === id);
   if (!b) return;
 
+  if (b.type === 'recurring') {
+    deleteRecurringBill(b);
+    return;
+  }
+
   let msg = 'Mover esta conta para a lixeira? Você poderá restaurar depois.';
-  if (b.type === 'recurring') msg = 'Mover esta ocorrência recorrente para a lixeira? As próximas continuam sendo geradas.';
   if (b.type === 'installment') msg = 'Mover esta parcela para a lixeira? As outras parcelas serão mantidas.';
   if (!confirm(msg)) return;
 
-  b.deleted = true;
-  b.deletedAt = new Date().toISOString();
+  softDeleteBill(b);
   save();
   render();
 }
@@ -552,6 +612,8 @@ function buildInstallments({ name, amount, date, category, total }) {
     paidAt: null,
     deleted: false,
     deletedAt: null,
+    cancelledFrom: null,
+    cancelledAt: null,
     recurring: false,
     installmentCurrent: i + 1,
     installmentTotal: count,
@@ -596,7 +658,7 @@ function saveBill() {
   } else {
     const base = {
       id: uid('bill'), name, amount, date, category: selectedCat,
-      type, paid: false, paidAt: null, deleted: false, deletedAt: null, recurring: type === 'recurring',
+      type, paid: false, paidAt: null, deleted: false, deletedAt: null, cancelledFrom: null, cancelledAt: null, recurring: type === 'recurring',
     };
     if (type === 'recurring') {
       base.seriesId = uid('rec');

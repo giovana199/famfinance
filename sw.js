@@ -1,9 +1,9 @@
-const CACHE_NAME = "famfinance-cache-v5";
+const CACHE_NAME = "famfinance-cache-v7";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./styles.css",
-  "./app.js",
+  "./styles.css?v=7",
+  "./app.js?v=7",
   "./manifest.json"
 ];
 
